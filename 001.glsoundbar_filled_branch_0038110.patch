@@ -1,0 +1,331 @@
+diff --git a/render/glsoundbar/src/gstglsoundbar.c b/render/glsoundbar/src/gstglsoundbar.c
+index 2d53479..c4fba2f 100644
+--- a/render/glsoundbar/src/gstglsoundbar.c
++++ b/render/glsoundbar/src/gstglsoundbar.c
+@@ -1,5 +1,5 @@
+-/* 71.5
+- * before patch resize in device fixed! (code with freeze error!) patch: https://github.com/IvanFedotovIvanFedotov/glsoundbar_patches read patches_links.txt
++/* 72
++ * resize in device fixed
+  * resize with restart fixed
+  *
+  * Copyright (C) <2011> Stefan Kost <ensonic@users.sf.net>
+@@ -183,6 +183,9 @@ _src_generate_fbo_gl (GstGLContext * context, GstGLSoundbar * src);
+ 
+ static void gst_glsoundbar_unreff_all(GstGLSoundbar * scope);
+ 
++static gboolean
++gl_reconfigure (GstPad * pad, GstObject * parent);
++
+ //static gboolean
+ //gst_glsoundbar_set_allocation (GstGLSoundbar * scope,
+ //    GstBufferPool * pool, GstAllocator * allocator,
+@@ -729,6 +732,8 @@ gst_glsoundbar_dispose (GObject * object)
+     scope->priv->inbuf=NULL;
+   }
+ 
++  g_mutex_clear (&scope->mutex_chain_function);
++
+   G_OBJECT_CLASS (parent_class)->dispose (object);
+ 
+ }
+@@ -873,6 +878,7 @@ gst_glsoundbar_chain (GstPad * pad, GstObject * parent,
+   gint bpf, rate;
+ 
+   scope = GST_GLSOUNDBAR (parent);
++  g_mutex_lock(&scope->mutex_chain_function);
+ 
+   GST_LOG_OBJECT (scope, "chainfunc called");
+ 
+@@ -881,113 +887,6 @@ gst_glsoundbar_chain (GstPad * pad, GstObject * parent,
+     gst_adapter_clear (scope->priv->adapter);
+   }
+ 
+-  GstCaps *othercaps=NULL;
+-  GstCaps *target=NULL;
+-  GstCaps *templ=NULL;
+-  GstStructure *structure=NULL;
+-  GstCaps *caps=NULL;
+-  GstVideoInfo info;
+-  guint min, max, size;
+-  gboolean update_pool;
+-  GstStructure *config;
+-
+-  scope = GST_GLSOUNDBAR (parent);
+-
+-  if((scope->priv->sinkpad_reconfigure_flag==1 ||
+-      gst_pad_check_reconfigure (scope->priv->srcpad)) &&
+-      scope->context!=NULL ){
+-    scope->priv->sinkpad_reconfigure_flag=0;
+-    templ = gst_pad_get_pad_template_caps (scope->priv->srcpad);
+-    othercaps = gst_pad_peer_query_caps (scope->priv->srcpad, NULL);
+-    if(othercaps==NULL){
+-      target = templ;
+-    }
+-    if(othercaps){
+-      target = gst_caps_intersect (othercaps, templ);
+-      if (gst_caps_is_empty (target)==TRUE){
+-        target = gst_caps_truncate (target);
+-      }
+-    }
+-    if (gst_caps_is_empty (target)==FALSE){
+-      target = gst_caps_make_writable (target);
+-      structure = gst_caps_get_structure (target, 0);
+-      gst_structure_fixate_field_nearest_int (structure, "width", 640);
+-      gst_structure_fixate_field_nearest_int (structure, "height", 480);
+-      gst_structure_fixate_field_nearest_fraction (structure, "framerate", 25, 1);
+-      if (gst_structure_has_field (structure, "pixel-aspect-ratio"))
+-        gst_structure_fixate_field_nearest_fraction (structure,
+-        "pixel-aspect-ratio", 1, 1);
+-      target = gst_caps_fixate (target);
+-      if (gst_video_info_from_caps (&info, target)==TRUE){
+-        scope->vinfo = info;
+-        scope->priv->frame_duration = gst_util_uint64_scale_int (GST_SECOND,
+-          GST_VIDEO_INFO_FPS_D (&info), GST_VIDEO_INFO_FPS_N (&info));
+-        scope->priv->spf =
+-          gst_util_uint64_scale_int (GST_AUDIO_INFO_RATE (&scope->ainfo),
+-          GST_VIDEO_INFO_FPS_D (&info), GST_VIDEO_INFO_FPS_N (&info));
+-        scope->req_spf = scope->priv->spf;
+-        gst_pad_set_caps (scope->priv->srcpad, target);
+-        if (scope->priv->pool!=NULL) {
+-          gst_buffer_pool_set_active (scope->priv->pool, FALSE);
+-          gst_object_unref (scope->priv->pool);
+-          scope->priv->pool=NULL;
+-          scope->priv->pool_active=FALSE;
+-        }
+-        if (scope->priv->query) {
+-          gst_query_unref (scope->priv->query);
+-          scope->priv->query=NULL;
+-        }
+-        scope->priv->query = gst_query_new_allocation (target, TRUE);
+-        gst_gl_context_thread_add (scope->context, (GstGLContextThreadFunc) gst_glsoundbar_gl_stop, scope);
+-        if ((gst_gl_context_get_gl_api (scope->context) & SUPPORTED_GL_APIS) == 0){
+-          //goto unsupported_gl_api;
+-          GST_DEBUG_OBJECT (scope, "GL. Reconfigure. Unsupported gl api");
+-        }
+-        gst_gl_context_thread_add (scope->context, (GstGLContextThreadFunc) _src_generate_fbo_gl, scope);
+-        if (!scope->fbo){
+-          GST_DEBUG_OBJECT (scope, "GL. Reconfigure. FBO not created");
+-        }
+-        gst_query_parse_allocation (scope->priv->query, &caps, NULL);
+-        if (gst_query_get_n_allocation_pools (scope->priv->query) > 0) {
+-          gst_query_parse_nth_allocation_pool (scope->priv->query, 0, &scope->priv->pool, &size, &min, &max);
+-          update_pool = TRUE;
+-        } else {
+-          size = scope->vinfo.size;
+-          min = max = 0;
+-          update_pool = FALSE;
+-        }
+-        if (!scope->priv->pool || !GST_IS_GL_BUFFER_POOL (scope->priv->pool)) {
+-          // can't use this pool
+-          if (scope->priv->pool){
+-            gst_object_unref (scope->priv->pool);
+-          }
+-          scope->priv->pool = gst_gl_buffer_pool_new (scope->context);
+-        }
+-        config = gst_buffer_pool_get_config (scope->priv->pool);
+-
+-        gst_buffer_pool_config_set_params (config, caps, size, min, max);
+-        gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
+-        if (gst_query_find_allocation_meta (scope->priv->query, GST_GL_SYNC_META_API_TYPE, NULL))
+-          gst_buffer_pool_config_add_option (config,
+-              GST_BUFFER_POOL_OPTION_GL_SYNC_META);
+-        gst_buffer_pool_config_add_option (config,
+-            GST_BUFFER_POOL_OPTION_VIDEO_GL_TEXTURE_UPLOAD_META);
+-
+-        gst_buffer_pool_set_config (scope->priv->pool, config);
+-
+-        if (update_pool)
+-          gst_query_set_nth_allocation_pool (scope->priv->query, 0, scope->priv->pool, size, min, max);
+-        else
+-          gst_query_add_allocation_pool (scope->priv->query, scope->priv->pool, size, min, max);
+-        gst_caps_unref (caps);
+-      }
+-    }
+-    if(othercaps!=NULL)gst_caps_unref (othercaps);
+-    if(templ!=NULL)gst_caps_unref (templ);
+-    othercaps=NULL;
+-    templ=NULL;
+-  }
+-
+   rate = GST_AUDIO_INFO_RATE (&scope->ainfo);
+   bpf = GST_AUDIO_INFO_BPF (&scope->ainfo);
+ 
+@@ -1087,6 +986,7 @@ gst_glsoundbar_chain (GstPad * pad, GstObject * parent,
+ 
+ beach:
+ 
++  g_mutex_unlock(&scope->mutex_chain_function);
+   return ret;
+ /*
+ not_negotiated:
+@@ -1099,6 +999,7 @@ not_negotiated:
+ audiosamplesbuf_proceed_error:
+   {
+     GST_DEBUG_OBJECT (scope, "Failed to audiosamplesbuf_proceed");
++    g_mutex_unlock(&scope->mutex_chain_function);
+ 
+     return GST_FLOW_NOT_NEGOTIATED;
+   }
+@@ -1106,6 +1007,122 @@ audiosamplesbuf_proceed_error:
+ }
+ 
+ 
++static gboolean
++gl_reconfigure (GstPad * pad, GstObject * parent)
++{
++
++  gboolean res = TRUE;
++  GstGLSoundbar *scope;
++  GstCaps *othercaps=NULL;
++  GstCaps *target=NULL;
++  GstCaps *templ=NULL;
++  GstStructure *structure=NULL;
++  GstCaps *caps=NULL;
++  GstVideoInfo info;
++  guint min, max, size;
++  gboolean update_pool;
++  GstStructure *config;
++
++  scope = GST_GLSOUNDBAR (parent);
++
++  if ( scope->context!=NULL ){
++    scope->priv->sinkpad_reconfigure_flag=0;
++    templ = gst_pad_get_pad_template_caps (scope->priv->srcpad);
++    othercaps = gst_pad_peer_query_caps (scope->priv->srcpad, NULL);
++    if(othercaps==NULL){
++      target = templ;
++    }
++    if(othercaps){
++      target = gst_caps_intersect (othercaps, templ);
++      if (gst_caps_is_empty (target)==TRUE){
++        target = gst_caps_truncate (target);
++      }
++    }
++    if (gst_caps_is_empty (target)==FALSE){
++      target = gst_caps_make_writable (target);
++      structure = gst_caps_get_structure (target, 0);
++      gst_structure_fixate_field_nearest_int (structure, "width", 640);
++      gst_structure_fixate_field_nearest_int (structure, "height", 480);
++      gst_structure_fixate_field_nearest_fraction (structure, "framerate", 25, 1);
++      if (gst_structure_has_field (structure, "pixel-aspect-ratio"))
++        gst_structure_fixate_field_nearest_fraction (structure,
++        "pixel-aspect-ratio", 1, 1);
++      target = gst_caps_fixate (target);
++      if (gst_video_info_from_caps (&info, target)==TRUE){
++        scope->vinfo = info;
++        scope->priv->frame_duration = gst_util_uint64_scale_int (GST_SECOND,
++          GST_VIDEO_INFO_FPS_D (&info), GST_VIDEO_INFO_FPS_N (&info));
++        scope->priv->spf =
++          gst_util_uint64_scale_int (GST_AUDIO_INFO_RATE (&scope->ainfo),
++          GST_VIDEO_INFO_FPS_D (&info), GST_VIDEO_INFO_FPS_N (&info));
++        scope->req_spf = scope->priv->spf;
++        gst_pad_set_caps (scope->priv->srcpad, target);
++        if (scope->priv->pool!=NULL) {
++          gst_buffer_pool_set_active (scope->priv->pool, FALSE);
++          gst_object_unref (scope->priv->pool);
++          scope->priv->pool=NULL;
++          scope->priv->pool_active=FALSE;
++        }
++        if (scope->priv->query) {
++          gst_query_unref (scope->priv->query);
++          scope->priv->query=NULL;
++        }
++        scope->priv->query = gst_query_new_allocation (target, TRUE);
++        gst_gl_context_thread_add (scope->context, (GstGLContextThreadFunc) gst_glsoundbar_gl_stop, scope);
++        if ((gst_gl_context_get_gl_api (scope->context) & SUPPORTED_GL_APIS) == 0){
++          //goto unsupported_gl_api;
++          GST_DEBUG_OBJECT (scope, "GL. Reconfigure. Unsupported gl api");
++          res = FALSE;
++        }
++        gst_gl_context_thread_add (scope->context, (GstGLContextThreadFunc) _src_generate_fbo_gl, scope);
++        if (!scope->fbo){
++          GST_DEBUG_OBJECT (scope, "GL. Reconfigure. FBO not created");
++          res = FALSE;
++        }
++        gst_query_parse_allocation (scope->priv->query, &caps, NULL);
++        if (gst_query_get_n_allocation_pools (scope->priv->query) > 0) {
++          gst_query_parse_nth_allocation_pool (scope->priv->query, 0, &scope->priv->pool, &size, &min, &max);
++          update_pool = TRUE;
++        } else {
++          size = scope->vinfo.size;
++          min = max = 0;
++          update_pool = FALSE;
++        }
++        if (!scope->priv->pool || !GST_IS_GL_BUFFER_POOL (scope->priv->pool)) {
++          // can't use this pool
++          if (scope->priv->pool){
++            gst_object_unref (scope->priv->pool);
++          }
++          scope->priv->pool = gst_gl_buffer_pool_new (scope->context);
++        }
++        config = gst_buffer_pool_get_config (scope->priv->pool);
++
++        gst_buffer_pool_config_set_params (config, caps, size, min, max);
++        gst_buffer_pool_config_add_option (config, GST_BUFFER_POOL_OPTION_VIDEO_META);
++        if (gst_query_find_allocation_meta (scope->priv->query, GST_GL_SYNC_META_API_TYPE, NULL))
++          gst_buffer_pool_config_add_option (config,
++              GST_BUFFER_POOL_OPTION_GL_SYNC_META);
++        gst_buffer_pool_config_add_option (config,
++            GST_BUFFER_POOL_OPTION_VIDEO_GL_TEXTURE_UPLOAD_META);
++
++        gst_buffer_pool_set_config (scope->priv->pool, config);
++
++        if (update_pool)
++          gst_query_set_nth_allocation_pool (scope->priv->query, 0, scope->priv->pool, size, min, max);
++        else
++          gst_query_add_allocation_pool (scope->priv->query, scope->priv->pool, size, min, max);
++        gst_caps_unref (caps);
++      }
++    }
++    if(othercaps!=NULL)gst_caps_unref (othercaps);
++    if(templ!=NULL)gst_caps_unref (templ);
++    othercaps=NULL;
++    templ=NULL;
++  }
++
++  return res;
++
++}
+ 
+ 
+ static gboolean
+@@ -1114,9 +1131,16 @@ gst_glsoundbar_src_event (GstPad * pad, GstObject * parent,
+ {
+   gboolean res;
+ 
++  GstGLSoundbar *scope;
++  scope = GST_GLSOUNDBAR (parent);
++
+   switch (GST_EVENT_TYPE (event)) {
+     case GST_EVENT_RECONFIGURE:
+ 
++      g_mutex_lock(&scope->mutex_chain_function);
++      gl_reconfigure(pad, parent);
++      g_mutex_unlock(&scope->mutex_chain_function);
++
+       // dont't forward
+       gst_event_unref (event);
+ 
+@@ -1361,6 +1385,8 @@ gst_glsoundbar_init (GstGLSoundbar * filter)
+ 
+   filter->prev_push_outbuf=NULL;
+ 
++  g_mutex_init(&filter->mutex_chain_function);
++
+ }
+ 
+ //S16LE
+diff --git a/render/glsoundbar/src/gstglsoundbar.h b/render/glsoundbar/src/gstglsoundbar.h
+index ad2e626..4d961f5 100644
+--- a/render/glsoundbar/src/gstglsoundbar.h
++++ b/render/glsoundbar/src/gstglsoundbar.h
+@@ -100,6 +100,8 @@ struct _GstGLSoundbar
+ 
+   GstBuffer *prev_push_outbuf;
+ 
++  GMutex mutex_chain_function;
++
+ };
+ 
+ struct _GstGLSoundbarClass

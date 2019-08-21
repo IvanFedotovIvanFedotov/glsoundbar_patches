@@ -1,0 +1,1 @@
+001.glsoundbar_filled_branch_0038110.patch to https://github.com/IvanFedotovIvanFedotov/ats-plugins/commit/0038110d2ff0c1e6d574c3790a7148339b6f6109 (glsoundbar_filled branch) patch reconfigure freezing in device error
